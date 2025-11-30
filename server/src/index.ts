@@ -1,19 +1,64 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import cookieParser from 'cookie-parser';
+import { z } from 'zod';
+
+// Import our services and middleware
+import { detectLanguage, analyzeIntent, generateProviderProfile, enhanceSearch, translateText } from './services/openai.js';
+import { authenticateToken, optionalAuth, hashPassword, verifyPassword, generateToken, createUser, findUserByEmail } from './middleware/auth-simple.js';
+import { registerSchema, loginSchema, updateProfileSchema, changePasswordSchema, createProviderSchema, searchProvidersSchema, analyzeTextSchema } from './validation/schemas.js';
+
+// Simple validation helper
+function validateBody(schema: z.ZodSchema, body: any) {
+  const result = schema.safeParse(body);
+  if (!result.success) {
+    throw new Error(`Validation failed: ${result.error.errors.map(e => e.message).join(', ')}`);
+  }
+  return result.data;
+}
 
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(cors());
-app.use(express.json());
+// Security middleware
+app.use(helmet());
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  credentials: true,
+}));
 
-// In-memory data storage
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.',
+});
+app.use('/api/', limiter);
+
+// Body parsing middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
+
+// In-memory storage (will be replaced with database)
+interface User {
+  id: string;
+  email: string;
+  passwordHash: string;
+  firstName: string;
+  lastName: string;
+  role: string;
+  createdAt: string;
+}
+
 interface Provider {
   id: string;
+  userId: string;
   name: string;
   category: string;
   description: string;
@@ -26,448 +71,614 @@ interface Provider {
     currency: string;
     type: string;
   };
+  languages: string[];
+  isVerified: boolean;
+  isActive: boolean;
   createdAt: string;
-  userId?: string;
 }
 
+interface Booking {
+  id: string;
+  customerId: string;
+  providerId: string;
+  serviceDate?: string;
+  status: string;
+  notes?: string;
+  totalAmount?: number;
+  currency: string;
+  createdAt: string;
+}
+
+interface Message {
+  id: string;
+  fromId: string;
+  toId: string;
+  message: string;
+  bookingId?: string;
+  isRead: boolean;
+  createdAt: string;
+}
+
+interface Review {
+  id: string;
+  bookingId: string;
+  customerId: string;
+  providerId: string;
+  rating: number;
+  comment?: string;
+  createdAt: string;
+}
+
+// In-memory storage
+const users: User[] = [];
 const providers: Provider[] = [
   {
     id: '1',
+    userId: 'system',
     name: 'Professional Plumbing Services',
-    category: 'Home Services',
+    category: 'Plumbing',
     description: 'Expert plumber with 15 years of experience. Emergency repairs, installations, and maintenance. Available 24/7.',
     location: 'London, UK',
     rating: 4.8,
     reviewCount: 127,
     pricing: { min: 50, max: 150, currency: 'GBP', type: 'per_service' },
+    languages: ['en'],
+    isVerified: true,
+    isActive: true,
     createdAt: new Date().toISOString()
   },
   {
     id: '2',
+    userId: 'system',
     name: 'QuickFix Plumbing',
-    category: 'Home Services',
+    category: 'Plumbing',
     description: '24/7 emergency plumbing services. Fast, reliable, and affordable. Licensed and insured.',
     location: 'London, UK',
     rating: 4.6,
     reviewCount: 89,
     pricing: { min: 40, max: 120, currency: 'GBP', type: 'per_service' },
+    languages: ['en'],
+    isVerified: true,
+    isActive: true,
     createdAt: new Date().toISOString()
   },
   {
     id: '3',
-    name: 'Elite Electrical Solutions',
-    category: 'Electrical Services',
-    description: 'Professional electrician specializing in residential and commercial electrical work. Certified and experienced.',
-    location: 'New York, USA',
-    rating: 4.9,
-    reviewCount: 203,
-    pricing: { min: 75, max: 200, currency: 'USD', type: 'per_service' },
-    createdAt: new Date().toISOString()
-  },
-  {
-    id: '4',
-    name: 'Clean & Shine Services',
-    category: 'Cleaning Services',
-    description: 'Professional cleaning services for homes and offices. Eco-friendly products, fully insured.',
-    location: 'Toronto, Canada',
+    userId: 'system',
+    name: 'Delhi Home Cleaning',
+    category: 'Cleaning',
+    description: 'Professional home cleaning services in Delhi. Deep cleaning, regular maintenance, and sanitization.',
+    location: 'Delhi, India',
     rating: 4.7,
     reviewCount: 156,
-    pricing: { min: 60, max: 180, currency: 'CAD', type: 'per_service' },
+    pricing: { min: 500, max: 2000, currency: 'INR', type: 'per_service' },
+    languages: ['hi', 'en'],
+    isVerified: true,
+    isActive: true,
     createdAt: new Date().toISOString()
   }
 ];
+const bookings: Booking[] = [];
+const messages: Message[] = [];
+const reviews: Review[] = [];
 
-// Helper function to detect language (simplified - in production, use OpenAI)
-function detectLanguage(text: string): { code: string; name: string; nativeName: string; confidence: number } {
-  // Simple keyword-based detection (in production, use OpenAI)
-  const lowerText = text.toLowerCase();
-  
-  if (/[\u0900-\u097F]/.test(text)) {
-    return { code: 'hi', name: 'Hindi', nativeName: 'हिन्दी', confidence: 0.95 };
-  }
-  if (/[\u4E00-\u9FFF]/.test(text)) {
-    return { code: 'zh', name: 'Chinese', nativeName: '中文', confidence: 0.95 };
-  }
-  if (/[\u0600-\u06FF]/.test(text)) {
-    return { code: 'ar', name: 'Arabic', nativeName: 'العربية', confidence: 0.95 };
-  }
-  if (/[ñáéíóúü]/.test(lowerText) && /(soy|estoy|tengo|servicio|profesional)/.test(lowerText)) {
-    return { code: 'es', name: 'Spanish', nativeName: 'Español', confidence: 0.90 };
-  }
-  
-  return { code: 'en', name: 'English', nativeName: 'English', confidence: 0.85 };
+// Utility functions
+function generateId(): string {
+  return Math.random().toString(36).substring(2) + Date.now().toString(36);
 }
 
-// Helper function to extract service details from description
-function extractServiceDetails(description: string, detectedLang: string) {
-  const lowerDesc = description.toLowerCase();
-  
-  // Extract category
-  let category = 'Home Services';
-  if (lowerDesc.includes('plumb') || lowerDesc.includes('नल') || lowerDesc.includes('fontanero')) {
-    category = 'Plumbing';
-  } else if (lowerDesc.includes('electric') || lowerDesc.includes('बिजली') || lowerDesc.includes('electricista')) {
-    category = 'Electrical Services';
-  } else if (lowerDesc.includes('clean') || lowerDesc.includes('सफाई') || lowerDesc.includes('limpieza')) {
-    category = 'Cleaning Services';
-  } else if (lowerDesc.includes('carpent') || lowerDesc.includes('बढ़ई') || lowerDesc.includes('carpintero')) {
-    category = 'Carpentry';
-  } else if (lowerDesc.includes('paint') || lowerDesc.includes('पेंट') || lowerDesc.includes('pintor')) {
-    category = 'Painting Services';
-  }
-  
-  // Extract pricing (look for numbers with currency indicators)
-  let minPrice = 50;
-  let maxPrice = 150;
-  let currency = 'USD';
-  
-  const priceMatch = description.match(/(\d+)\s*(?:-|to|–)\s*(\d+)|(\d+)\s*(?:per|hour|hr|day)/i);
-  if (priceMatch) {
-    minPrice = parseInt(priceMatch[1] || priceMatch[3] || '50');
-    maxPrice = parseInt(priceMatch[2] || priceMatch[3] || '150');
-  }
-  
-  // Detect currency based on location keywords or language
-  if (lowerDesc.includes('london') || lowerDesc.includes('uk') || lowerDesc.includes('britain')) {
-    currency = 'GBP';
-  } else if (lowerDesc.includes('toronto') || lowerDesc.includes('canada')) {
-    currency = 'CAD';
-  } else if (lowerDesc.includes('euro') || lowerDesc.includes('€') || lowerDesc.includes('madrid') || lowerDesc.includes('paris')) {
-    currency = 'EUR';
-  } else if (detectedLang === 'hi' || lowerDesc.includes('delhi') || lowerDesc.includes('mumbai')) {
-    currency = 'INR';
-  } else if (detectedLang === 'zh' || lowerDesc.includes('beijing') || lowerDesc.includes('shanghai')) {
-    currency = 'CNY';
-  }
-  
-  // Extract name (first sentence or first few words)
-  const sentences = description.split(/[.!?]/);
-  let name = sentences[0]?.trim() || 'Professional Service Provider';
-  if (name.length > 50) {
-    name = name.substring(0, 47) + '...';
-  }
-  
-  return { category, minPrice, maxPrice, currency, name };
+function findUserByEmail(email: string): User | undefined {
+  return users.find(user => user.email === email);
+}
+
+function findUserById(id: string): User | undefined {
+  return users.find(user => user.id === id);
+}
+
+function findProviderById(id: string): Provider | undefined {
+  return providers.find(provider => provider.id === id);
 }
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'LocalEase API is running' });
+  res.json({
+    status: 'ok',
+    message: 'LocalEase API is running',
+    features: {
+      ai: !!process.env.OPENAI_API_KEY,
+      auth: true,
+      database: false // Will be true when we add PostgreSQL
+    },
+    debug: {
+      hasOpenAIKey: !!process.env.OPENAI_API_KEY,
+      keyLength: process.env.OPENAI_API_KEY ? process.env.OPENAI_API_KEY.length : 0
+    }
+  });
 });
 
-// AI endpoints
+// Authentication endpoints
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { email, password, firstName, lastName } = validateBody(registerSchema, req.body);
+
+    // Create user using the auth service
+    const user = await createUser({ email, password, firstName, lastName });
+
+    // Generate JWT token
+    const token = generateToken({ id: user.id, email: user.email, role: user.role });
+
+    res.status(201).json({
+      message: 'User registered successfully',
+      user,
+      token,
+    });
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = validateBody(loginSchema, req.body);
+
+    // Find user
+    const user = findUserByEmail(email);
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // Verify password
+    const isValidPassword = await verifyPassword(password, user.passwordHash);
+    if (!isValidPassword) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // Generate token
+    const token = generateToken({ id: user.id, email: user.email, role: user.role });
+
+    res.json({
+      message: 'Login successful',
+      user: {
+        id: user.id,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        role: user.role,
+      },
+      token,
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
+  try {
+    const user = findUserById(req.user!.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        phone: user.phone || '',
+        location: user.location || '',
+        language: user.language || 'en',
+        role: user.role,
+      },
+    });
+  } catch (error) {
+    console.error('Get profile error:', error);
+    res.status(500).json({ error: 'Failed to get profile' });
+  }
+});
+
+// Update user profile
+app.put('/api/auth/profile', authenticateToken, async (req, res) => {
+  try {
+    const { firstName, lastName, phone, location, language } = validateBody(updateProfileSchema, req.body);
+
+    const user = findUserById(req.user!.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Update user data
+    Object.assign(user, {
+      firstName: firstName || user.firstName,
+      lastName: lastName || user.lastName,
+      phone: phone || user.phone,
+      location: location || user.location,
+      language: language || user.language,
+    });
+
+    res.json({
+      message: 'Profile updated successfully',
+      user: {
+        id: user.id,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        phone: user.phone || '',
+        location: user.location || '',
+        language: user.language || 'en',
+        role: user.role,
+      },
+    });
+  } catch (error: any) {
+    console.error('Update profile error:', error);
+    res.status(400).json({ error: error.message || 'Failed to update profile' });
+  }
+});
+
+// Change password
+app.put('/api/auth/change-password', authenticateToken, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = validateBody(changePasswordSchema, req.body);
+
+    const user = findUserById(req.user!.id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Verify current password
+    const isValidPassword = await verifyPassword(currentPassword, user.passwordHash);
+    if (!isValidPassword) {
+      return res.status(400).json({ error: 'Current password is incorrect' });
+    }
+
+    // Hash new password
+    user.passwordHash = await hashPassword(newPassword);
+
+    res.json({
+      message: 'Password changed successfully',
+    });
+  } catch (error: any) {
+    console.error('Change password error:', error);
+    res.status(400).json({ error: error.message || 'Failed to change password' });
+  }
+});
+
+// AI endpoints with real OpenAI integration
 app.post('/api/ai/analyze', async (req, res) => {
   try {
-    const { text } = req.body;
-    
-    if (!text) {
-      return res.status(400).json({ error: 'Text is required' });
+    const { text } = validateBody(analyzeTextSchema, req.body);
+
+    if (!process.env.OPENAI_API_KEY) {
+      // Fallback to simple analysis
+      const detectedLanguage = { code: 'en', name: 'English', nativeName: 'English', confidence: 0.5 };
+      const intent = {
+        primaryIntent: 'search_service',
+        confidence: 0.5,
+        entities: { service: 'general', urgency: 'normal' },
+        suggestedAction: 'Search for local services'
+      };
+
+      return res.json({ language: { detectedLanguage }, intent });
     }
-    
-    const detectedLanguage = detectLanguage(text);
-    
-    // Simple intent detection
-    const lowerText = text.toLowerCase();
-    let primaryIntent = 'search_service';
-    let service = 'general';
-    
-    if (lowerText.includes('need') || lowerText.includes('looking for') || lowerText.includes('find') || lowerText.includes('search')) {
-      primaryIntent = 'search_service';
-    } else if (lowerText.includes('i am') || lowerText.includes('i\'m') || lowerText.includes('soy') || lowerText.includes('मैं')) {
-      primaryIntent = 'create_profile';
-    }
-    
-    if (lowerText.includes('plumb')) service = 'plumber';
-    else if (lowerText.includes('electric')) service = 'electrician';
-    else if (lowerText.includes('clean')) service = 'cleaner';
-    
+
+    // Real AI analysis
+    const detectedLanguage = await detectLanguage(text);
+    const intent = await analyzeIntent(text, detectedLanguage);
+
     res.json({
-      language: {
-        detectedLanguage
-      },
-      intent: {
-        primaryIntent,
-        confidence: 0.95,
-        entities: {
-          service,
-          urgency: lowerText.includes('urgent') || lowerText.includes('emergency') ? 'high' : 'normal'
-        },
-        suggestedAction: primaryIntent === 'search_service' 
-          ? `Search for ${service} services` 
-          : 'Create service provider profile'
-      }
+      language: { detectedLanguage },
+      intent
     });
   } catch (error) {
-    console.error('Error analyzing text:', error);
-    res.status(500).json({ error: 'Failed to analyze text' });
+    console.error('AI analysis error:', error);
+    res.status(500).json({ error: 'Analysis failed' });
   }
 });
 
-app.post('/api/ai/create-profile', async (req, res) => {
+app.post('/api/ai/create-profile', authenticateToken, async (req, res) => {
   try {
-    const { description, userId, location } = req.body;
-    
-    if (!description) {
-      return res.status(400).json({ error: 'Description is required' });
+    const { description, location } = validateBody(createProviderSchema, req.body);
+    const userId = req.user!.id;
+
+    if (!process.env.OPENAI_API_KEY) {
+      // Fallback profile generation
+      const provider: Provider = {
+        id: generateId(),
+        userId,
+        name: 'Professional Service Provider',
+        category: 'Home Services',
+        description: description.substring(0, 200),
+        location: location || 'Local area',
+        rating: 0,
+        reviewCount: 0,
+        pricing: { min: 50, max: 150, currency: 'USD', type: 'per_service' },
+        languages: ['en'],
+        isVerified: false,
+        isActive: true,
+        createdAt: new Date().toISOString(),
+      };
+
+      providers.push(provider);
+      return res.json({ provider, aiAnalysis: { detectedLanguage: { code: 'en', name: 'English' } } });
     }
-    
-    const detectedLanguage = detectLanguage(description);
-    const serviceDetails = extractServiceDetails(description, detectedLanguage.code);
-    
-    // Extract location from description if not provided
-    let providerLocation = location || 'Unknown Location';
-    const locationKeywords = ['london', 'new york', 'toronto', 'delhi', 'mumbai', 'madrid', 'paris', 'beijing'];
-    for (const keyword of locationKeywords) {
-      if (description.toLowerCase().includes(keyword)) {
-        providerLocation = keyword.charAt(0).toUpperCase() + keyword.slice(1);
-        break;
-      }
-    }
-    
-    const newProvider: Provider = {
-      id: `provider-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      name: serviceDetails.name,
-      category: serviceDetails.category,
-      description: description,
-      location: providerLocation,
+
+    // Real AI profile generation
+    const detectedLanguage = await detectLanguage(description);
+    const profileData = await generateProviderProfile(description, detectedLanguage, location);
+
+    const provider: Provider = {
+      id: generateId(),
+      userId,
+      name: profileData.name,
+      category: profileData.category,
+      description: profileData.description,
+      location: location || profileData.serviceArea,
       rating: 0,
       reviewCount: 0,
-      pricing: {
-        min: serviceDetails.minPrice,
-        max: serviceDetails.maxPrice,
-        currency: serviceDetails.currency,
-        type: 'per_service'
-      },
+      pricing: profileData.pricing,
+      languages: profileData.languages,
+      isVerified: false,
+      isActive: true,
       createdAt: new Date().toISOString(),
-      userId
     };
-    
-    providers.push(newProvider);
-    
+
+    providers.push(provider);
+
     res.json({
-      provider: newProvider,
-      aiAnalysis: {
-        detectedLanguage: {
-          code: detectedLanguage.code,
-          name: detectedLanguage.name
-        }
-      }
+      provider,
+      aiAnalysis: { detectedLanguage }
     });
   } catch (error) {
-    console.error('Error creating profile:', error);
-    res.status(500).json({ error: 'Failed to create profile' });
+    console.error('Profile creation error:', error);
+    res.status(500).json({ error: 'Profile creation failed' });
   }
 });
 
-app.post('/api/ai/search', async (req, res) => {
+app.post('/api/ai/search', optionalAuth, async (req, res) => {
   try {
-    const { query, userLanguage, location } = req.body;
-    
-    if (!query) {
-      return res.status(400).json({ error: 'Query is required' });
-    }
-    
-    const detectedLanguage = detectLanguage(query);
-    const lowerQuery = query.toLowerCase();
-    
-    // Simple search matching
-    const matchedProviders = providers.filter(provider => {
-      const searchText = `${provider.name} ${provider.description} ${provider.category} ${provider.location}`.toLowerCase();
-      return searchText.includes(lowerQuery) || 
-             lowerQuery.includes(provider.category.toLowerCase()) ||
-             (lowerQuery.includes('plumb') && provider.category.toLowerCase().includes('plumb')) ||
-             (lowerQuery.includes('electric') && provider.category.toLowerCase().includes('electric')) ||
-             (lowerQuery.includes('clean') && provider.category.toLowerCase().includes('clean'));
-    });
-    
-    res.json({
-      providers: matchedProviders,
-      searchAnalysis: {
+    const { query, userLanguage, location } = validateBody(searchProvidersSchema, req.body);
+
+    let searchResults = [...providers];
+    let searchAnalysis = {
+      query,
+      queryTranslated: query,
+      intent: 'search_service',
+      category: 'General Services',
+      detectedLanguage: { code: 'en', name: 'English' }
+    };
+
+    if (process.env.OPENAI_API_KEY) {
+      // Real AI search enhancement
+      const detectedLanguage = await detectLanguage(query);
+      const enhancedSearch = await enhanceSearch(query, detectedLanguage, location);
+
+      searchAnalysis = {
         query,
         queryTranslated: query,
-        intent: 'search_service',
-        category: matchedProviders[0]?.category || 'Home Services',
-        detectedLanguage: {
-          code: detectedLanguage.code,
-          name: detectedLanguage.name
-        }
+        intent: enhancedSearch.searchIntent,
+        category: enhancedSearch.category,
+        detectedLanguage
+      };
+
+      // Filter by category if detected
+      if (enhancedSearch.category && enhancedSearch.category !== 'General Services') {
+        searchResults = searchResults.filter(provider =>
+          provider.category.toLowerCase().includes(enhancedSearch.category.toLowerCase()) ||
+          provider.description.toLowerCase().includes(enhancedSearch.category.toLowerCase())
+        );
       }
+
+      // Filter by keywords
+      if (enhancedSearch.keywords && enhancedSearch.keywords.length > 0) {
+        searchResults = searchResults.filter(provider => {
+          const searchText = `${provider.name} ${provider.description} ${provider.category}`.toLowerCase();
+        return enhancedSearch.keywords.some((keyword: string) =>
+          searchText.includes(keyword.toLowerCase())
+        );
+        });
+      }
+    } else {
+      // Simple keyword search fallback
+      const queryLower = query.toLowerCase();
+      searchResults = searchResults.filter(provider => {
+        const searchText = `${provider.name} ${provider.description} ${provider.category}`.toLowerCase();
+        return searchText.includes(queryLower);
+      });
+    }
+
+    // Filter by location if provided
+    if (location) {
+      searchResults = searchResults.filter(provider =>
+        provider.location.toLowerCase().includes(location.toLowerCase())
+      );
+    }
+
+    // Sort by rating
+    searchResults.sort((a, b) => b.rating - a.rating);
+
+    res.json({
+      providers: searchResults,
+      searchAnalysis
     });
   } catch (error) {
-    console.error('Error searching:', error);
-    res.status(500).json({ error: 'Failed to search' });
+    console.error('Search error:', error);
+    res.status(500).json({ error: 'Search failed' });
   }
 });
 
 // Provider endpoints
-app.get('/api/providers', (req, res) => {
+app.get('/api/providers', optionalAuth, (req, res) => {
   try {
-    const { q, category, location } = req.query;
-    
-    let filteredProviders = [...providers];
-    
+    const { category, location, q } = req.query;
+    let results = [...providers];
+
+    if (category) {
+      results = results.filter(p => p.category.toLowerCase().includes((category as string).toLowerCase()));
+    }
+
+    if (location) {
+      results = results.filter(p => p.location.toLowerCase().includes((location as string).toLowerCase()));
+    }
+
     if (q) {
       const query = (q as string).toLowerCase();
-      filteredProviders = filteredProviders.filter(provider => {
-        const searchText = `${provider.name} ${provider.description} ${provider.category}`.toLowerCase();
-        return searchText.includes(query);
-      });
-    }
-    
-    if (category) {
-      filteredProviders = filteredProviders.filter(provider => 
-        provider.category.toLowerCase().includes((category as string).toLowerCase())
+      results = results.filter(p =>
+        p.name.toLowerCase().includes(query) ||
+        p.description.toLowerCase().includes(query) ||
+        p.category.toLowerCase().includes(query)
       );
     }
-    
-    if (location) {
-      filteredProviders = filteredProviders.filter(provider => 
-        provider.location.toLowerCase().includes((location as string).toLowerCase())
-      );
-    }
-    
-    res.json({ providers: filteredProviders });
+
+    results.sort((a, b) => b.rating - a.rating);
+
+    res.json({ providers: results });
   } catch (error) {
-    console.error('Error fetching providers:', error);
+    console.error('Get providers error:', error);
     res.status(500).json({ error: 'Failed to fetch providers' });
   }
 });
 
-app.get('/api/providers/:id', (req, res) => {
+app.get('/api/providers/:id', optionalAuth, (req, res) => {
   try {
-    const { id } = req.params;
-    const provider = providers.find(p => p.id === id);
-    
+    const provider = findProviderById(req.params.id);
     if (!provider) {
       return res.status(404).json({ error: 'Provider not found' });
     }
-    
+
     res.json({ provider });
   } catch (error) {
-    console.error('Error fetching provider:', error);
+    console.error('Get provider error:', error);
     res.status(500).json({ error: 'Failed to fetch provider' });
   }
 });
 
-app.post('/api/providers', (req, res) => {
-  try {
-    const { name, category, description, location, pricing, userId } = req.body;
-    
-    if (!name || !category || !description) {
-      return res.status(400).json({ error: 'Name, category, and description are required' });
-    }
-    
-    const newProvider: Provider = {
-      id: `provider-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      name,
-      category,
-      description,
-      location: location || 'Unknown Location',
-      rating: 0,
-      reviewCount: 0,
-      pricing: pricing || { min: 50, max: 150, currency: 'USD', type: 'per_service' },
-      createdAt: new Date().toISOString(),
-      userId
-    };
-    
-    providers.push(newProvider);
-    
-    res.status(201).json({ provider: newProvider });
-  } catch (error) {
-    console.error('Error creating provider:', error);
-    res.status(500).json({ error: 'Failed to create provider' });
-  }
-});
-
 // Booking endpoints
-app.post('/api/bookings', (req, res) => {
+app.post('/api/bookings', authenticateToken, (req, res) => {
   try {
-    const { providerId, customerId, serviceDate, notes } = req.body;
-    
-    if (!providerId || !customerId) {
-      return res.status(400).json({ error: 'Provider ID and customer ID are required' });
+    const { providerId, serviceDate, notes } = req.body;
+    const customerId = req.user!.id;
+
+    const provider = findProviderById(providerId);
+    if (!provider) {
+      return res.status(404).json({ error: 'Provider not found' });
     }
-    
-    const booking = {
-      id: `booking-${Date.now()}`,
-      providerId,
+
+    const booking: Booking = {
+      id: generateId(),
       customerId,
-      serviceDate: serviceDate || new Date().toISOString(),
-      notes: notes || '',
+      providerId,
+      serviceDate,
       status: 'pending',
-      createdAt: new Date().toISOString()
+      notes,
+      currency: provider.pricing.currency,
+      createdAt: new Date().toISOString(),
     };
-    
+
+    bookings.push(booking);
+
     res.status(201).json({ booking });
   } catch (error) {
-    console.error('Error creating booking:', error);
+    console.error('Booking creation error:', error);
     res.status(500).json({ error: 'Failed to create booking' });
   }
 });
 
 // Message endpoints
-app.post('/api/messages', (req, res) => {
+app.post('/api/messages', authenticateToken, (req, res) => {
   try {
-    const { fromId, toId, message } = req.body;
-    
-    if (!fromId || !toId || !message) {
-      return res.status(400).json({ error: 'From ID, to ID, and message are required' });
-    }
-    
-    const newMessage = {
-      id: `message-${Date.now()}`,
+    const { toId, message, bookingId } = req.body;
+    const fromId = req.user!.id;
+
+    const newMessage: Message = {
+      id: generateId(),
       fromId,
       toId,
       message,
-      createdAt: new Date().toISOString()
+      bookingId,
+      isRead: false,
+      createdAt: new Date().toISOString(),
     };
-    
+
+    messages.push(newMessage);
+
     res.status(201).json({ message: newMessage });
   } catch (error) {
-    console.error('Error sending message:', error);
+    console.error('Message creation error:', error);
     res.status(500).json({ error: 'Failed to send message' });
   }
 });
 
 // Review endpoints
-app.post('/api/reviews', (req, res) => {
+app.post('/api/reviews', authenticateToken, (req, res) => {
   try {
-    const { providerId, customerId, rating, comment } = req.body;
-    
-    if (!providerId || !customerId || !rating) {
-      return res.status(400).json({ error: 'Provider ID, customer ID, and rating are required' });
-    }
-    
-    if (rating < 1 || rating > 5) {
-      return res.status(400).json({ error: 'Rating must be between 1 and 5' });
-    }
-    
-    // Update provider rating (simplified - in production, calculate average)
-    const provider = providers.find(p => p.id === providerId);
-    if (provider) {
-      provider.reviewCount += 1;
-      provider.rating = ((provider.rating * (provider.reviewCount - 1)) + rating) / provider.reviewCount;
-    }
-    
-    const review = {
-      id: `review-${Date.now()}`,
-      providerId,
+    const { providerId, bookingId, rating, comment } = req.body;
+    const customerId = req.user!.id;
+
+    const review: Review = {
+      id: generateId(),
+      bookingId,
       customerId,
+      providerId,
       rating,
-      comment: comment || '',
-      createdAt: new Date().toISOString()
+      comment,
+      createdAt: new Date().toISOString(),
     };
-    
-    res.status(201).json({ review, provider });
+
+    reviews.push(review);
+
+    // Update provider rating
+    const provider = findProviderById(providerId);
+    if (provider) {
+      const providerReviews = reviews.filter(r => r.providerId === providerId);
+      const avgRating = providerReviews.reduce((sum, r) => sum + r.rating, 0) / providerReviews.length;
+      provider.rating = Math.round(avgRating * 10) / 10;
+      provider.reviewCount = providerReviews.length;
+    }
+
+    res.status(201).json({ review });
   } catch (error) {
-    console.error('Error creating review:', error);
+    console.error('Review creation error:', error);
     res.status(500).json({ error: 'Failed to create review' });
   }
+});
+
+// Translation endpoint
+app.post('/api/translate', authenticateToken, async (req, res) => {
+  try {
+    const { text, fromLang, toLang } = req.body;
+
+    if (!process.env.OPENAI_API_KEY) {
+      return res.json({ translatedText: text }); // Fallback: return original text
+    }
+
+    const translatedText = await translateText(text, fromLang, toLang);
+    res.json({ translatedText });
+  } catch (error) {
+    console.error('Translation error:', error);
+    res.status(500).json({ error: 'Translation failed' });
+  }
+});
+
+// Error handling middleware
+app.use((error: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error('Unhandled error:', error);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({ error: 'Endpoint not found' });
 });
 
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 LocalEase API server running on http://localhost:${PORT}`);
   console.log(`📡 Health check: http://localhost:${PORT}/api/health`);
+  console.log(`🤖 AI features: ${process.env.OPENAI_API_KEY ? '✅ Enabled' : '❌ Disabled (set OPENAI_API_KEY)'}`);
+  console.log(`🔐 Authentication: ✅ Enabled`);
   console.log(`📊 Total providers: ${providers.length}`);
 });
+
+export default app;

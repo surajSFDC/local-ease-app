@@ -1,10 +1,12 @@
 import { useState } from 'react'
 import { useLocation } from 'wouter'
-import { Search, Sparkles, Globe, Zap, Shield, Users } from 'lucide-react'
+import { Search, Sparkles, Globe, Zap, Shield, Users, LogOut, User } from 'lucide-react'
+import { useAuth } from '../contexts/AuthContext'
 
 export default function HomePage() {
   const [, setLocation] = useLocation()
   const [searchQuery, setSearchQuery] = useState('')
+  const { user, logout, isAuthenticated } = useAuth()
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault()
@@ -31,13 +33,51 @@ export default function HomePage() {
               <span className="text-2xl font-bold gradient-text">LocalEase</span>
             </div>
             <div className="flex items-center space-x-4">
-              <button className="glass-button text-sm">Sign In</button>
-              <button 
-                onClick={() => setLocation('/provider-signup')}
-                className="glass-button-primary text-sm"
-              >
-                Become a Provider
-              </button>
+              {isAuthenticated ? (
+                <>
+                  <div className="flex items-center space-x-2 text-white/80">
+                    <User className="w-4 h-4" />
+                    <span className="text-sm">
+                      {user?.firstName} {user?.lastName}
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => setLocation('/profile')}
+                    className="glass-button text-sm flex items-center space-x-2"
+                  >
+                    <User className="w-4 h-4" />
+                    <span>My Profile</span>
+                  </button>
+                  <button
+                    onClick={logout}
+                    className="glass-button text-sm flex items-center space-x-2"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    <span>Sign Out</span>
+                  </button>
+                  <button
+                    onClick={() => setLocation('/provider-signup')}
+                    className="glass-button-primary text-sm"
+                  >
+                    Become a Provider
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={() => setLocation('/login')}
+                    className="glass-button text-sm"
+                  >
+                    Sign In
+                  </button>
+                  <button
+                    onClick={() => setLocation('/register')}
+                    className="glass-button-primary text-sm"
+                  >
+                    Sign Up
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -53,7 +93,7 @@ export default function HomePage() {
               <span className="gradient-text">Powered by AI</span>
             </h1>
             <p className="text-xl md:text-2xl text-white/80 mb-12 max-w-3xl mx-auto">
-              Connect with service providers worldwide in 100+ languages. 
+              Connect with service providers worldwide in 100+ languages.
               AI-powered matching, instant translation, seamless booking.
             </p>
           </div>
@@ -89,7 +129,7 @@ export default function HomePage() {
           <h2 className="text-4xl font-bold text-center mb-16 gradient-text">
             Why Choose LocalEase?
           </h2>
-          
+
           <div className="grid md:grid-cols-3 gap-8">
             {[
               {

@@ -1,4 +1,13 @@
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+
+// Helper function to get auth headers
+function getAuthHeaders() {
+  const token = localStorage.getItem('auth_token');
+  return {
+    'Content-Type': 'application/json',
+    ...(token && { 'Authorization': `Bearer ${token}` }),
+  };
+}
 
 export interface Provider {
   id: string;
@@ -67,7 +76,7 @@ export const api = {
   async searchProviders(query: string, userLanguage?: string, location?: string): Promise<SearchResponse> {
     const response = await fetch(`${API_BASE_URL}/api/ai/search`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ query, userLanguage, location }),
     });
     if (!response.ok) throw new Error('Failed to search providers');
@@ -80,15 +89,19 @@ export const api = {
     if (query) params.append('q', query);
     if (category) params.append('category', category);
     if (location) params.append('location', location);
-    
-    const response = await fetch(`${API_BASE_URL}/api/providers?${params.toString()}`);
+
+    const response = await fetch(`${API_BASE_URL}/api/providers?${params.toString()}`, {
+      headers: getAuthHeaders(),
+    });
     if (!response.ok) throw new Error('Failed to fetch providers');
     return response.json();
   },
 
   // Get single provider
   async getProvider(id: string): Promise<{ provider: Provider }> {
-    const response = await fetch(`${API_BASE_URL}/api/providers/${id}`);
+    const response = await fetch(`${API_BASE_URL}/api/providers/${id}`, {
+      headers: getAuthHeaders(),
+    });
     if (!response.ok) throw new Error('Failed to fetch provider');
     return response.json();
   },
@@ -97,7 +110,7 @@ export const api = {
   async createProfile(description: string, userId?: string, location?: string): Promise<CreateProfileResponse> {
     const response = await fetch(`${API_BASE_URL}/api/ai/create-profile`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ description, userId, location }),
     });
     if (!response.ok) throw new Error('Failed to create profile');
@@ -108,7 +121,7 @@ export const api = {
   async analyzeText(text: string): Promise<AnalyzeResponse> {
     const response = await fetch(`${API_BASE_URL}/api/ai/analyze`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ text }),
     });
     if (!response.ok) throw new Error('Failed to analyze text');
@@ -119,7 +132,7 @@ export const api = {
   async createBooking(providerId: string, customerId: string, serviceDate?: string, notes?: string) {
     const response = await fetch(`${API_BASE_URL}/api/bookings`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ providerId, customerId, serviceDate, notes }),
     });
     if (!response.ok) throw new Error('Failed to create booking');
@@ -130,7 +143,7 @@ export const api = {
   async sendMessage(fromId: string, toId: string, message: string) {
     const response = await fetch(`${API_BASE_URL}/api/messages`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ fromId, toId, message }),
     });
     if (!response.ok) throw new Error('Failed to send message');
@@ -141,11 +154,51 @@ export const api = {
   async createReview(providerId: string, customerId: string, rating: number, comment?: string) {
     const response = await fetch(`${API_BASE_URL}/api/reviews`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ providerId, customerId, rating, comment }),
     });
     if (!response.ok) throw new Error('Failed to create review');
     return response.json();
   },
-};
 
+  // Profile management
+  async getProfile() {
+    const response = await fetch(`${API_BASE_URL}/api/auth/me`, {
+      headers: getAuthHeaders(),
+    });
+    if (!response.ok) throw new Error('Failed to get profile');
+    return response.json();
+  },
+
+  async updateProfile(profileData: {
+    firstName?: string;
+    lastName?: string;
+    phone?: string;
+    location?: string;
+    language?: string;
+  }) {
+    const response = await fetch(`${API_BASE_URL}/api/auth/profile`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(profileData),
+    });
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.error || 'Failed to update profile');
+    }
+    return response.json();
+  },
+
+  async changePassword(currentPassword: string, newPassword: string) {
+    const response = await fetch(`${API_BASE_URL}/api/auth/change-password`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.error || 'Failed to change password');
+    }
+    return response.json();
+  },
+};
